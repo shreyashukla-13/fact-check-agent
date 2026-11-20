@@ -1,7 +1,7 @@
 import streamlit as st
 from pypdf import PdfReader
-from google import genai
-from google.genai import types
+from groq import Groq
+from ddgs import DDGS
 from pydantic import BaseModel, Field
 from typing import Literal
 import json
@@ -14,19 +14,18 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Structured Output Schema ---
+# --- Structured Output Schemas ---
+class ExtractedClaims(BaseModel):
+    claims: list[str] = Field(description="List of specific, verifiable factual claims (stats, dates, financial/technical figures) from the PDF.")
+
 class ClaimResult(BaseModel):
-    claim: str = Field(description="The exact factual claim, stat, date, or financial figure extracted from the PDF.")
+    claim: str = Field(description="The exact factual claim extracted from the PDF.")
     verdict: Literal["Verified", "Inaccurate", "False"] = Field(
         description="Verified if accurate and current; Inaccurate if outdated or wrong number; False if fabricated or unverified."
     )
     real_fact: str = Field(description="The verified real-world fact or corrected figure based on live web search.")
     explanation: str = Field(description="Brief explanation comparing the PDF claim to live web data.")
     source_url: str = Field(description="Primary URL supporting the verification, or 'None found' if False.")
-
-class FactCheckReport(BaseModel):
-    summary: str = Field(description="A 2-sentence overall reliability summary of the document.")
-    results: list[ClaimResult]
 
 # --- Helper Functions ---
 def extract_text_from_pdf(uploaded_file) -> str:
@@ -38,57 +37,85 @@ def extract_text_from_pdf(uploaded_file) -> str:
             pages_text.append(f"--- Page {idx + 1} ---\n{text}")
     return "\n\n".join(pages_text)
 
-def analyze_and_verify_pdf(pdf_text: str, api_key: str) -> FactCheckReport:
-    client = genai.Client(api_key=api_key)
-    
+def extract_claims(client: Groq, pdf_text: str) -> list[str]:
     prompt = f"""
-    You are a strict, investigative Fact-Checking Agent acting as a 'Truth Layer' for marketing and business reports.
+    Extract ALL specific, verifiable factual claims from the following text—especially statistics, percentages, dates, historical milestones, financial figures, and technical metrics. Ignore pure marketing fluff or subjective opinions.
     
-    Task:
-    1. Read the provided PDF text carefully.
-    2. Extract ALL specific, verifiable factual claims—especially statistics, percentages, dates, historical milestones, financial figures, and technical metrics. Ignore pure marketing fluff or subjective opinions.
-    3. Use Google Search to verify EACH extracted claim against live, up-to-date web data.
-    4. Classify each claim strictly as:
-       - "Verified": The number, date, or fact matches current, authoritative live web sources.
-       - "Inaccurate": The claim contains an outdated statistic, wrong number, or altered date (e.g., citing 2020 numbers as current, or inflating a real metric). Provide the exact corrected real-world fact.
-       - "False": The claim is completely fabricated, hallucinated, or has zero credible supporting evidence on the web.
+    Return ONLY a valid JSON object with a single key "claims" containing a list of strings.
     
     Document Text:
-    {pdf_text[:30000]}
+    {pdf_text[:25000]}
     """
-
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[{"google_search": {}}],
-            response_mime_type="application/json",
-            response_schema=FactCheckReport,
-            temperature=0.1,
-        ),
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        temperature=0.1,
     )
+    data = json.loads(response.choices[0].message.content)
+    return data.get("claims", [])
+
+def search_live_web(query: str) -> str:
+    try:
+        results = DDGS().text(query, max_results=4)
+        if not results:
+            return "No live web search results found."
+        formatted = []
+        for r in results:
+            formatted.append(f"- Title: {r.get('title')}\n  Snippet: {r.get('body')}\n  URL: {r.get('href')}")
+        return "\n".join(formatted)
+    except Exception as e:
+        return f"Search error: {e}"
+
+def verify_single_claim(client: Groq, claim: str, search_context: str) -> ClaimResult:
+    prompt = f"""
+    You are a strict investigative Fact-Checking Agent. Compare the PDF Claim against the Live Web Search Evidence below.
     
-    data = json.loads(response.text)
-    return FactCheckReport(**data)
+    PDF Claim: "{claim}"
+    
+    Live Web Search Evidence:
+    {search_context}
+    
+    Classify the claim strictly as:
+    - "Verified": The number, date, or fact matches current, authoritative live web sources.
+    - "Inaccurate": The claim contains an outdated statistic, wrong number, or altered date (e.g., citing old population/revenue numbers as current, or inflating a real metric). Provide the exact corrected real-world fact from the search results.
+    - "False": The claim is completely fabricated, hallucinated, or contradicted/unsupported by credible evidence on the web.
+    
+    Return ONLY a valid JSON object matching these exact keys:
+    {{
+        "claim": "{claim}",
+        "verdict": "Verified" | "Inaccurate" | "False",
+        "real_fact": "The verified real-world fact or corrected figure",
+        "explanation": "Brief 1-2 sentence explanation comparing the PDF claim to live web data",
+        "source_url": "Best matching URL from the search results, or 'None found'"
+    }}
+    """
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        temperature=0.1,
+    )
+    data = json.loads(response.choices[0].message.content)
+    return ClaimResult(**data)
 
 # --- UI Layout ---
 st.title("🔍 TruthLayer: Automated PDF Fact-Check Agent")
 st.markdown("Upload a PDF report to extract statistics, dates, and financial claims and verify them against **live web data**.")
 
-# Sidebar for API Key (falls back to Streamlit Secrets if deployed)
 with st.sidebar:
     st.header("⚙️ Configuration")
-    default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else os.environ.get("GEMINI_API_KEY", "")
-    api_key = st.text_input("Gemini API Key", value=default_key, type="password", help="Get a free key from Google AI Studio")
-    st.info("💡 **How it works:** Extracts hard claims (stats, dates, financials) and cross-references them using live Google Search grounding.")
+    default_key = st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else os.environ.get("GROQ_API_KEY", "")
+    api_key = st.text_input("Groq API Key", value=default_key, type="password", help="Get a free key from console.groq.com")
+    st.info("💡 **How it works:** Extracts hard claims (stats, dates, financials) and cross-references them against live web search results.")
 
 uploaded_file = st.file_uploader("Upload a PDF Document", type=["pdf"])
 
 if uploaded_file is not None:
     if not api_key:
-        st.warning("⚠️ Please enter your Gemini API Key in the sidebar (or configure `GEMINI_API_KEY` in Streamlit Secrets).")
+        st.warning("⚠️ Please enter your Groq API Key in the sidebar (or configure `GROQ_API_KEY` in Streamlit Secrets).")
     else:
-        with st.spinner("📄 Reading PDF and extracting factual claims..."):
+        with st.spinner("📄 Reading PDF..."):
             pdf_text = extract_text_from_pdf(uploaded_file)
         
         if not pdf_text.strip():
@@ -98,28 +125,41 @@ if uploaded_file is not None:
                 st.text(pdf_text[:3000] + ("..." if len(pdf_text) > 3000 else ""))
             
             if st.button("🚀 Run Live Fact-Check", type="primary"):
-                with st.spinner("🌐 Cross-referencing claims against live web data..."):
-                    try:
-                        report = analyze_and_verify_pdf(pdf_text, api_key)
+                client = Groq(api_key=api_key)
+                try:
+                    with st.spinner("🧠 Extracting factual claims from document..."):
+                        claims = extract_claims(client, pdf_text)
+                    
+                    if not claims:
+                        st.warning("No specific numerical, date, or statistical claims were detected in this PDF.")
+                    else:
+                        results: list[ClaimResult] = []
+                        progress_bar = st.progress(0, text="🌐 Verifying claims against live web data...")
+                        
+                        for i, claim in enumerate(claims):
+                            progress_bar.progress((i) / len(claims), text=f"🌐 Checking claim {i+1} of {len(claims)}...")
+                            search_context = search_live_web(claim)
+                            result = verify_single_claim(client, claim, search_context)
+                            results.append(result)
+                        
+                        progress_bar.empty()
                         
                         # Metrics Row
-                        verified_count = sum(1 for r in report.results if r.verdict == "Verified")
-                        inaccurate_count = sum(1 for r in report.results if r.verdict == "Inaccurate")
-                        false_count = sum(1 for r in report.results if r.verdict == "False")
+                        verified_count = sum(1 for r in results if r.verdict == "Verified")
+                        inaccurate_count = sum(1 for r in results if r.verdict == "Inaccurate")
+                        false_count = sum(1 for r in results if r.verdict == "False")
                         
                         st.subheader("📊 Verification Scorecard")
                         col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("Total Claims Checked", len(report.results))
+                        col1.metric("Total Claims Checked", len(results))
                         col2.metric("✅ Verified", verified_count)
                         col3.metric("⚠️ Inaccurate / Outdated", inaccurate_count)
                         col4.metric("❌ False / Unverified", false_count)
-                        
-                        st.info(f"**Executive Summary:** {report.summary}")
                         st.divider()
                         
                         # Detailed Claim Cards
                         st.subheader("📋 Detailed Claim-by-Claim Report")
-                        for idx, item in enumerate(report.results, 1):
+                        for idx, item in enumerate(results, 1):
                             if item.verdict == "Verified":
                                 badge = "✅ VERIFIED"
                                 box_fn = st.success
@@ -138,5 +178,5 @@ if uploaded_file is not None:
                                 if item.source_url and item.source_url.startswith("http"):
                                     st.markdown(f"🔗 **Source:** [{item.source_url}]({item.source_url})")
                                     
-                    except Exception as e:
-                        st.error(f"An error occurred during verification: {e}")
+                except Exception as e:
+                    st.error(f"An error occurred during verification: {e}")
