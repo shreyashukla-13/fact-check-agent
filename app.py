@@ -14,10 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Structured Output Schemas ---
-class ExtractedClaims(BaseModel):
-    claims: list[str] = Field(description="List of specific, verifiable factual claims (stats, dates, financial/technical figures) from the PDF.")
-
+# --- Structured Output Schema ---
 class ClaimResult(BaseModel):
     claim: str = Field(description="The exact factual claim extracted from the PDF.")
     verdict: Literal["Verified", "Inaccurate", "False"] = Field(
@@ -37,7 +34,25 @@ def extract_text_from_pdf(uploaded_file) -> str:
             pages_text.append(f"--- Page {idx + 1} ---\n{text}")
     return "\n\n".join(pages_text)
 
-def extract_claims(client: Groq, pdf_text: str) -> list[str]:
+def get_active_groq_model(client: Groq) -> str:
+    models = client.models.list().data
+    available_ids = [m.id for m in models]
+    preferred = [
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "llama-3.3-70b-specdec",
+        "qwen/qwen3-32b",
+        "llama-3.1-8b-instant",
+    ]
+    for model_id in preferred:
+        if model_id in available_ids:
+            return model_id
+    for mid in available_ids:
+        if "whisper" not in mid and "guard" not in mid and "tts" not in mid:
+            return mid
+    return "llama-3.1-8b-instant"
+
+def extract_claims(client: Groq, pdf_text: str, model_name: str) -> list[str]:
     prompt = f"""
     Extract ALL specific, verifiable factual claims from the following text—especially statistics, percentages, dates, historical milestones, financial figures, and technical metrics. Ignore pure marketing fluff or subjective opinions.
     
@@ -47,7 +62,7 @@ def extract_claims(client: Groq, pdf_text: str) -> list[str]:
     {pdf_text[:25000]}
     """
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=model_name,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
         temperature=0.1,
@@ -67,7 +82,7 @@ def search_live_web(query: str) -> str:
     except Exception as e:
         return f"Search error: {e}"
 
-def verify_single_claim(client: Groq, claim: str, search_context: str) -> ClaimResult:
+def verify_single_claim(client: Groq, claim: str, search_context: str, model_name: str) -> ClaimResult:
     prompt = f"""
     You are a strict investigative Fact-Checking Agent. Compare the PDF Claim against the Live Web Search Evidence below.
     
@@ -91,7 +106,7 @@ def verify_single_claim(client: Groq, claim: str, search_context: str) -> ClaimR
     }}
     """
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=model_name,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
         temperature=0.1,
@@ -127,8 +142,9 @@ if uploaded_file is not None:
             if st.button("🚀 Run Live Fact-Check", type="primary"):
                 client = Groq(api_key=api_key)
                 try:
+                    model_name = get_active_groq_model(client)
                     with st.spinner("🧠 Extracting factual claims from document..."):
-                        claims = extract_claims(client, pdf_text)
+                        claims = extract_claims(client, pdf_text, model_name)
                     
                     if not claims:
                         st.warning("No specific numerical, date, or statistical claims were detected in this PDF.")
@@ -139,7 +155,7 @@ if uploaded_file is not None:
                         for i, claim in enumerate(claims):
                             progress_bar.progress((i) / len(claims), text=f"🌐 Checking claim {i+1} of {len(claims)}...")
                             search_context = search_live_web(claim)
-                            result = verify_single_claim(client, claim, search_context)
+                            result = verify_single_claim(client, claim, search_context, model_name)
                             results.append(result)
                         
                         progress_bar.empty()
