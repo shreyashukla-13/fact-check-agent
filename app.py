@@ -37,20 +37,18 @@ def extract_text_from_pdf(uploaded_file) -> str:
 def get_active_groq_model(client: Groq) -> str:
     models = client.models.list().data
     available_ids = [m.id for m in models]
-    preferred = [
-        "meta-llama/llama-4-maverick-17b-128e-instruct",
-        "meta-llama/llama-4-scout-17b-16e-instruct",
-        "llama-3.3-70b-specdec",
-        "qwen/qwen3-32b",
-        "llama-3.1-8b-instant",
-    ]
-    for model_id in preferred:
-        if model_id in available_ids:
-            return model_id
-    for mid in available_ids:
-        if "whisper" not in mid and "guard" not in mid and "tts" not in mid:
-            return mid
-    return "llama-3.1-8b-instant"
+    
+    # Filter out audio, TTS, moderation, and special-terms models
+    blocked = ("whisper", "guard", "tts", "orpheus", "playai", "compound", "allam", "distil")
+    chat_models = [mid for mid in available_ids if not any(b in mid.lower() for b in blocked)]
+    
+    preferred_keywords = ["llama-4", "llama-3.3", "llama-3.1-70b", "qwen", "gpt-oss", "llama-3.1-8b", "gemma"]
+    for kw in preferred_keywords:
+        for mid in chat_models:
+            if kw in mid.lower():
+                return mid
+                
+    return chat_models[0] if chat_models else "llama-3.1-8b-instant"
 
 def extract_claims(client: Groq, pdf_text: str, model_name: str) -> list[str]:
     prompt = f"""
@@ -162,37 +160,4 @@ if uploaded_file is not None:
                         
                         # Metrics Row
                         verified_count = sum(1 for r in results if r.verdict == "Verified")
-                        inaccurate_count = sum(1 for r in results if r.verdict == "Inaccurate")
-                        false_count = sum(1 for r in results if r.verdict == "False")
-                        
-                        st.subheader("📊 Verification Scorecard")
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("Total Claims Checked", len(results))
-                        col2.metric("✅ Verified", verified_count)
-                        col3.metric("⚠️ Inaccurate / Outdated", inaccurate_count)
-                        col4.metric("❌ False / Unverified", false_count)
-                        st.divider()
-                        
-                        # Detailed Claim Cards
-                        st.subheader("📋 Detailed Claim-by-Claim Report")
-                        for idx, item in enumerate(results, 1):
-                            if item.verdict == "Verified":
-                                badge = "✅ VERIFIED"
-                                box_fn = st.success
-                            elif item.verdict == "Inaccurate":
-                                badge = "⚠️ INACCURATE / OUTDATED"
-                                box_fn = st.warning
-                            else:
-                                badge = "❌ FALSE / NO EVIDENCE"
-                                box_fn = st.error
-                            
-                            with st.container(border=True):
-                                st.markdown(f"### Claim #{idx}: {badge}")
-                                st.markdown(f"**PDF Statement:** *\"{item.claim}\"*")
-                                box_fn(f"**Real-World Fact:** {item.real_fact}")
-                                st.markdown(f"**Analysis:** {item.explanation}")
-                                if item.source_url and item.source_url.startswith("http"):
-                                    st.markdown(f"🔗 **Source:** [{item.source_url}]({item.source_url})")
-                                    
-                except Exception as e:
-                    st.error(f"An error occurred during verification: {e}")
+                        inaccurate_count
