@@ -5,6 +5,7 @@ from ddgs import DDGS
 from pydantic import BaseModel, Field
 from typing import Literal
 import json
+import re
 import os
 
 st.set_page_config(
@@ -43,11 +44,22 @@ def get_active_groq_model(client: Groq) -> str:
                 return mid
     return chat_models[0] if chat_models else "llama-3.1-8b-instant"
 
+def parse_json_safely(raw_text: str) -> dict:
+    cleaned = raw_text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1:
+        cleaned = cleaned[start:end + 1]
+    return json.loads(cleaned, strict=False)
+
 def extract_claims(client: Groq, pdf_text: str, model_name: str) -> list[str]:
     prompt = f"""
     Extract ALL specific, verifiable factual claims from the following text—especially statistics, percentages, dates, historical milestones, financial figures, and technical metrics. Ignore pure marketing fluff or subjective opinions.
     
-    Return ONLY a valid JSON object with a single key "claims" containing a list of strings.
+    Respond with ONLY valid JSON in this exact format:
+    {{"claims": ["claim 1", "claim 2"]}}
     
     Document Text:
     {pdf_text[:25000]}
@@ -55,10 +67,9 @@ def extract_claims(client: Groq, pdf_text: str, model_name: str) -> list[str]:
     response = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
         temperature=0.1,
     )
-    data = json.loads(response.choices[0].message.content)
+    data = parse_json_safely(response.choices[0].message.content)
     return data.get("claims", [])
 
 def search_live_web(query: str) -> str:
@@ -71,39 +82,56 @@ def search_live_web(query: str) -> str:
             formatted.append(f"- Title: {r.get('title')}\n  Snippet: {r.get('body')}\n  URL: {r.get('href')}")
         return "\n".join(formatted)
     except Exception as e:
-        return f"Search error: {e}"
+        return f"Search unavailable: {e}"
 
 def verify_single_claim(client: Groq, claim: str, search_context: str, model_name: str) -> ClaimResult:
     prompt = f"""
-    You are a strict investigative Fact-Checking Agent. Compare the PDF Claim against the Live Web Search Evidence below.
+    You are a strict investigative Fact-Checking Agent. Compare the PDF Claim against the Live Web Search Evidence below (and your verified factual knowledge if search snippets are limited).
     
-    PDF Claim: "{claim}"
+    PDF Claim: {json.dumps(claim)}
     
     Live Web Search Evidence:
     {search_context}
     
     Classify the claim strictly as:
     - "Verified": The number, date, or fact matches current, authoritative live web sources.
-    - "Inaccurate": The claim contains an outdated statistic, wrong number, or altered date (e.g., citing old population/revenue numbers as current, or inflating a real metric). Provide the exact corrected real-world fact from the search results.
+    - "Inaccurate": The claim contains an outdated statistic, wrong number, or altered date (e.g., citing old population/revenue numbers as current, or inflating a real metric). Provide the exact corrected real-world fact.
     - "False": The claim is completely fabricated, hallucinated, or contradicted/unsupported by credible evidence on the web.
     
-    Return ONLY a valid JSON object matching these exact keys:
+    Respond with ONLY valid JSON (no markdown fences, no extra text) using these exact keys:
     {{
-        "claim": "{claim}",
-        "verdict": "Verified" | "Inaccurate" | "False",
+        "claim": {json.dumps(claim)},
+        "verdict": "Verified",
         "real_fact": "The verified real-world fact or corrected figure",
         "explanation": "Brief 1-2 sentence explanation comparing the PDF claim to live web data",
-        "source_url": "Best matching URL from the search results, or 'None found'"
+        "source_url": "Best matching URL from the search results, or None found"
     }}
     """
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        temperature=0.1,
-    )
-    data = json.loads(response.choices[0].message.content)
-    return ClaimResult(**data)
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+        )
+        data = parse_json_safely(response.choices[0].message.content)
+        verdict = data.get("verdict", "False")
+        if verdict not in ("Verified", "Inaccurate", "False"):
+            verdict = "Inaccurate" if "inaccurate" in verdict.lower() else ("Verified" if "verified" in verdict.lower() else "False")
+        return ClaimResult(
+            claim=claim,
+            verdict=verdict,
+            real_fact=str(data.get("real_fact", "No verified data returned.")),
+            explanation=str(data.get("explanation", "Compared against live search records.")),
+            source_url=str(data.get("source_url", "None found")),
+        )
+    except Exception as e:
+        return ClaimResult(
+            claim=claim,
+            verdict="False",
+            real_fact="Could not verify claim automatically.",
+            explanation=f"Verification fallback triggered: {str(e)[:120]}",
+            source_url="None found",
+        )
 
 st.title("🔍 TruthLayer: Automated PDF Fact-Check Agent")
 st.markdown("Upload a PDF report to extract statistics, dates, and financial claims and verify them against **live web data**.")
