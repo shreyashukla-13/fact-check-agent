@@ -1,15 +1,30 @@
-# 🔍 TruthLayer — Automated PDF Fact-Check Agent
+# TruthLayer 🛡️
+**Automated Document & Claim Verification Engine**
 
-An AI-powered "Truth Layer" web application that extracts factual claims (statistics, dates, financial and technical figures) from uploaded PDFs and verifies them against live Google Search data.
+[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-App-FF4B4B.svg)](https://streamlit.io/)
+[![Status](https://img.shields.io/badge/Status-MVP%20Prototype-success.svg)]()
 
-## Features
-- **Automated Claim Extraction:** Isolates hard metrics, dates, and financial claims while filtering out subjective marketing copy.
-- **Live Web Verification:** Uses Gemini 2.5 Flash with real-time Google Search grounding to cross-check every claim.
-- **Actionable Truth Report:** Classifies each claim as **Verified**, **Inaccurate** (providing the real updated stat), or **False**, complete with source links.
+---
 
-## Local Setup
-1. Clone this repository:
-   
-```bash
-   git clone [https://github.com/YOUR_USERNAME/fact-check-agent.git](https://github.com/YOUR_USERNAME/fact-check-agent.git)
-   cd fact-check-agent
+## 📌 Problem Statement
+Enterprise teams across compliance, finance, and operations increasingly rely on AI-generated summaries and complex PDF reports—yet manual fact-checking remains slow, error-prone, and expensive. Without automated verification against trusted ground-truth documents, subtle factual discrepancies or hallucinations create high operational risk.
+
+**TruthLayer** bridges this trust gap by extracting structured claims from uploaded PDF reports, cross-validating them against verified ground-truth sources, flagging discrepancies, and generating an automated accuracy scorecard.
+
+---
+
+## ✨ Key Features
+* **Automated Claim Extraction:** Parses unstructured PDF reports into discrete, verifiable factual statements.
+* **Ground-Truth Cross-Validation:** Compares extracted claims against trusted reference documents to detect matches, contradictions, and unverified statements.
+* **Discrepancy Flagging:** Highlights conflicting claims so reviewers can immediately focus on high-risk anomalies rather than reading entire documents.
+* **Automated Accuracy Scorecard:** Generates a structured verification summary quantifying overall document reliability and claim-level accuracy.
+* **Interactive UI:** Lightweight, fast-loading web interface built with **Streamlit** for rapid prototyping and stakeholder demos.
+
+---
+
+## 🏗️ How It Works (Workflow)
+```text
+[Target PDF Report] ──┐
+                      ├──► [Claim Extraction & Parsing] ──► [Cross-Validation Engine] ──► [Discrepancy Flags + Accuracy Scorecard]
+[Ground-Truth Source] ┘
